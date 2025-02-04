@@ -10,6 +10,7 @@ use proc_macro2::TokenStream;
 use syn::spanned::Spanned;
 
 
+// Intermediate Representation
 #[derive(Clone)]
 enum _Expr {
     _Number(syn::LitInt),
@@ -30,6 +31,8 @@ enum _Expr {
     },
 }
 
+// Bit of a hack so that I could use the native syn token
+// types to parse identifiers, binops, and booleans as ids
 #[derive(Clone)]
 enum _IdTypes {
     _Id(syn::Ident),
@@ -43,6 +46,7 @@ struct _Clause {
     binding: Box<_Expr>,
 }
 
+// Converts an expression to a token stream
 impl ToTokens for _Expr {
     fn to_tokens(&self, tokens: &mut TokenStream) {
         let stream = match self {
@@ -79,6 +83,7 @@ impl ToTokens for _Expr {
     }
 }
 
+// Converts all forms of identifier into a token stream
 impl ToTokens for _IdTypes {
     fn to_tokens(&self, tokens: &mut TokenStream) {
         let stream = match self {
@@ -90,6 +95,7 @@ impl ToTokens for _IdTypes {
     }
 }
 
+// Parses an expression
 impl Parse for _Expr {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         syn::custom_keyword!(proc);
@@ -120,6 +126,7 @@ impl Parse for _Expr {
     }
 }
 
+// Parses an identifier
 impl Parse for _IdTypes {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         if peek_op(&input) {
@@ -141,6 +148,7 @@ impl Parse for _IdTypes {
     }
 }
 
+// Parse a clause
 impl Parse for _Clause {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         if input.peek(syn::token::Bracket) {
@@ -159,6 +167,7 @@ impl Parse for _Clause {
     }
 }
 
+// Parse an if-statement
 fn parse_if_expr(input: ParseBuffer) -> syn::Result<_Expr> {
     let _ = input.parse::<Token![if]>()?;
     let guard: _Expr = input.parse()?;
@@ -171,8 +180,7 @@ fn parse_if_expr(input: ParseBuffer) -> syn::Result<_Expr> {
     })
 }
 
-
-
+// Parse the declare syntactic sugar into a procedure and application
 fn parse_declare(input: ParseBuffer) -> syn::Result<_Expr> {
     // get the 'declare' keyword
     syn::custom_keyword!(declare);
@@ -203,6 +211,7 @@ fn parse_declare(input: ParseBuffer) -> syn::Result<_Expr> {
     })
 }
 
+// parse a procedure
 fn parse_procedure(input: ParseBuffer) -> syn::Result<_Expr> {
     syn::custom_keyword!(proc);
     let _ : proc = input.parse()?;
@@ -219,6 +228,7 @@ fn parse_procedure(input: ParseBuffer) -> syn::Result<_Expr> {
     })
 }
 
+// parse an application
 fn parse_application(input: ParseBuffer) -> syn::Result<_Expr> {
     let procedure: _Expr = input.parse()?;
     let args: Vec<_Expr> = parse_zero_or_more(&input);
@@ -229,6 +239,7 @@ fn parse_application(input: ParseBuffer) -> syn::Result<_Expr> {
     })
 }
 
+// parse the base expressions
 fn parse_atoms(input: ParseStream) -> syn::Result<_Expr> {
     if input.peek(syn::LitStr) {
         Ok(_Expr::_String(input.parse()?))
@@ -241,6 +252,7 @@ fn parse_atoms(input: ParseStream) -> syn::Result<_Expr> {
     }
 }
 
+// helper function for parsing zero-or-more tokens
 fn parse_zero_or_more<T: Parse>(input: &ParseBuffer) -> Vec<T> {
     let mut result: Vec<T> = Vec::new();
     while let Ok(item) = input.parse() {
@@ -249,6 +261,8 @@ fn parse_zero_or_more<T: Parse>(input: &ParseBuffer) -> Vec<T> {
     result
 }
 
+// helper function to check if the next token is one of the
+// accepted binary operators
 fn peek_op(input: &ParseStream) -> bool {
     // Define a list of concrete token types
     let prim_ops: [&dyn Fn(&ParseStream) -> bool; 6] = [
@@ -355,6 +369,7 @@ fn generate_print_expr(expr: &_Expr, indent: usize) -> TokenStream {
 }
 
 #[proc_macro]
+// expands the program to valid rust syntax, so it can be evaluated
 pub fn interp(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     // Parse the input as _Expr
     let expr = syn::parse_macro_input!(input as _Expr);
@@ -364,7 +379,7 @@ pub fn interp(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     proc_macro::TokenStream::from(tokens)
 }
 
-
+// recursively descends the ast, producing valid rust tokens
 fn walk_ast(expr: &_Expr) -> TokenStream {
     match expr {
         _Expr::_Number(n) => { quote! { #n } },
@@ -421,6 +436,7 @@ fn walk_ast(expr: &_Expr) -> TokenStream {
     }
 }
 
+// helper case for handling infix binary operators
 fn handle_prim(op: TokenStream, args: Vec<TokenStream>) -> TokenStream {
     if args.len() != 2 {
         let span = op.span();
@@ -436,6 +452,7 @@ fn handle_prim(op: TokenStream, args: Vec<TokenStream>) -> TokenStream {
     }
 }
 
+// helper case for normal procedures
 fn handle_proc(proc: TokenStream, args: Vec<TokenStream>) -> TokenStream {
     quote! {
         #proc(#(#args),*)
