@@ -2,18 +2,22 @@
 
 Implements a simple lisp-like language using rust procedural macros.
 
+Supports optional type annotations for procedures and declare expressions.
+
 ## Language Definition
 ```
 <expr> ::= <num>
-        |  <id>
+        |  <id> 
         |  <string>
         |  { if <expr> <expr> <expr> }
-        |  { declare (<clause>*) in <expr> }
-        |  { proc (<id>*) <expr> }
+        |  { declare (<clause>*) <rettype>? in <expr> }
+        |  { proc (<annot>*) <rettype>? <expr> }
         |  { <expr> <expr>* }
         ;
         
-<clause> ::= [ <id> <expr> ]
+<annot> ::= <id> | [<id> : <type>]
+<rettype> ::= : <type>         
+<clause> ::= [ <annot> <expr> ]
 ```
 
 *Note:* 'id' includes the binary operators: +, -, *, /, ==, <= 
