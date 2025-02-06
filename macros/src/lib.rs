@@ -1,7 +1,6 @@
 
 use syn::{Token};
 use syn::parse::{Parse, ParseBuffer, ParseStream};
-use syn::token::{Plus, Minus, Star, Slash, EqEq, Le};
 
 use quote::{quote, quote_spanned, TokenStreamExt, ToTokens};
 
@@ -14,8 +13,13 @@ use syn::spanned::Spanned;
 #[derive(Clone)]
 enum _Expr {
     _Number(syn::LitInt),
-    _Identifier(_IdTypes),
+    _Identifier {
+        id: syn::Ident,
+        type_annotation: Option<syn::Type>,
+    },
+    _Bool(syn::LitBool),
     _String(syn::LitStr),
+    _BinOp(syn::BinOp),
     _If {
         guard: Box<_Expr>,
         then: Box<_Expr>,
@@ -24,20 +28,12 @@ enum _Expr {
     _Procedure {
         params: Vec<_Expr>, //should be Identifier
         body: Box<_Expr>,
+        type_annotation: Option<syn::Type>,
     },
     _Application {
         proc: Box<_Expr>,
         args: Vec<_Expr>,
     },
-}
-
-// Bit of a hack so that I could use the native syn token
-// types to parse identifiers, binops, and booleans as ids
-#[derive(Clone)]
-enum _IdTypes {
-    _Id(syn::Ident),
-    _Op(syn::BinOp),
-    _Bool(syn::LitBool)
 }
 
 #[derive(Clone)]
@@ -51,45 +47,43 @@ impl ToTokens for _Expr {
     fn to_tokens(&self, tokens: &mut TokenStream) {
         let stream = match self {
             _Expr::_Number(n) => quote! { _Expr::_Number(#n) },
-            _Expr::_Identifier(id) => quote! { _Expr::_Identifier(#id) },
-            _Expr::_String(s) => quote! { _Expr::_String(#s) },
-            _Expr::_If { guard, then, other } => {
+            _Expr::_Bool(bl) => quote! { _Expr::_Bool(#bl) },
+            _Expr::_Identifier{id, type_annotation} => {
                 quote! {
-                _Expr::_If {
-                        guard: Box::new(#guard),
-                        then: Box::new(#then),
-                        other: Box::new(#other)
+                    _Expr::_Identifier {
+                        id: #id,
+                        type_annotation: #type_annotation,
                     }
                 }
             },
-            _Expr::_Procedure { params, body } => {
+            _Expr::_String(s) => quote! { _Expr::_String(#s) },
+            _Expr::_BinOp(b) => quote! { _Expr::_BinOp(#b) },
+            _Expr::_If { guard, then, other } => {
+                quote! {
+                _Expr::_If {
+                        guard: #guard,
+                        then: #then,
+                        other: #other,
+                    }
+                }
+            },
+            _Expr::_Procedure { params, body, type_annotation } => {
                 quote! {
                 _Expr::_Procedure {
-                        params: vec![#(#params),*],
-                        body: Box::new(#body)
+                        params: #(#params),*,
+                        body: #body,
+                        type_annotation: #type_annotation,
                     }
                 }
             },
             _Expr::_Application { proc, args } => {
                 quote! {
                     _Expr::_Application {
-                        proc: Box::new(#proc),
-                        args: vec![#(#args),*]
+                        proc: #proc,
+                        args: #(#args),*,
                     }
                 }
             }
-        };
-        tokens.append_all(stream);
-    }
-}
-
-// Converts all forms of identifier into a token stream
-impl ToTokens for _IdTypes {
-    fn to_tokens(&self, tokens: &mut TokenStream) {
-        let stream = match self {
-            _IdTypes::_Op(op) => quote! { _IdTypes::_Op(#op) },
-            _IdTypes::_Id(id) => quote! { _IdTypes::_Id(#id) },
-            _IdTypes::_Bool(bl) => quote! { _IdTypes::_Id(#bl) },
         };
         tokens.append_all(stream);
     }
@@ -111,42 +105,21 @@ impl Parse for _Expr {
 
             // Try to parse procedures
             if content.peek(proc) {
-                return parse_procedure(content);
+                return parse_procedure(&content);
             }
 
             // Try to parse declarations
             if content.peek(declare) {
-                return parse_declare(content);
+                return parse_declare(&content);
             }
 
-            parse_application(content)
+            parse_application(&content)
         } else {
             parse_atoms(input)
         }
     }
 }
 
-// Parses an identifier
-impl Parse for _IdTypes {
-    fn parse(input: ParseStream) -> syn::Result<Self> {
-        if peek_op(&input) {
-            let op: syn::BinOp = input.parse()?;
-            return Ok(_IdTypes::_Op(op));
-        }
-
-        if input.peek(syn::Ident) {
-            let id: syn::Ident = input.parse()?;
-            return Ok(_IdTypes::_Id(id));
-        }
-
-        if input.peek(syn::LitBool) {
-            let bl: syn::LitBool = input.parse()?;
-            return Ok(_IdTypes::_Bool(bl));
-        }
-
-        return Err(input.error("Invalid Id Token"))
-    }
-}
 
 // Parse a clause
 impl Parse for _Clause {
@@ -155,7 +128,7 @@ impl Parse for _Clause {
             let content;
             syn::bracketed!(content in input);
 
-            let name: _Expr = _Expr::_Identifier(content.parse()?);
+            let name: _Expr = parse_optional_annotation(&content)?;
             let binding: _Expr = content.parse()?;
             Ok(Self {
                 name,
@@ -181,7 +154,7 @@ fn parse_if_expr(input: ParseBuffer) -> syn::Result<_Expr> {
 }
 
 // Parse the declare syntactic sugar into a procedure and application
-fn parse_declare(input: ParseBuffer) -> syn::Result<_Expr> {
+fn parse_declare(input: &ParseBuffer) -> syn::Result<_Expr> {
     // get the 'declare' keyword
     syn::custom_keyword!(declare);
     let _ : declare = input.parse()?;
@@ -191,11 +164,21 @@ fn parse_declare(input: ParseBuffer) -> syn::Result<_Expr> {
     syn::parenthesized!(content in input);
     let clauses: Vec<_Clause> = parse_zero_or_more(&content);
 
+    // parse optional type annotation
+    let type_annotation = if input.peek(Token![:]) {
+        let _ = input.parse::<Token![:]>()?;
+        Some(input.parse::<syn::Type>()?)
+    } else {
+        None
+    };
+
     // get the 'in' keyword
     let _ = input.parse::<Token![in]>()?;
 
-    // unpack the clauses and body expression
+    // unpack body expression
     let body: _Expr = input.parse()?;
+
+    // split clauses into names and expressions
     let params: Vec<_Expr> = clauses.clone().into_iter()
         .map(|clause| clause.name).collect();
     let args: Vec<_Expr> = clauses.clone().into_iter()
@@ -206,30 +189,62 @@ fn parse_declare(input: ParseBuffer) -> syn::Result<_Expr> {
         proc: Box::new(_Expr::_Procedure {
             body: Box::new(body),
             params,
+            type_annotation,
         }),
         args,
     })
 }
 
 // parse a procedure
-fn parse_procedure(input: ParseBuffer) -> syn::Result<_Expr> {
+fn parse_procedure(input: &ParseBuffer) -> syn::Result<_Expr> {
     syn::custom_keyword!(proc);
     let _ : proc = input.parse()?;
 
+    // parse the parameters
     let param_content;
     syn::parenthesized!(param_content in input);
-    let params: Vec<_Expr> = parse_zero_or_more(&param_content);
+    let params: Vec<_Expr> = parse_zero_or_more_compound(&param_content, parse_optional_annotation);
 
+    // parse optional type annotation
+    let type_annotation = if input.peek(Token![:]) {
+        let _ = input.parse::<Token![:]>()?;
+        Some(input.parse::<syn::Type>()?)
+    } else {
+        None
+    };
+
+    // parse the body
     let body: _Expr = input.parse()?;
 
     Ok(_Expr::_Procedure{
         params,
         body: Box::new(body),
+        type_annotation,
     })
 }
 
+fn parse_optional_annotation(input: &ParseBuffer) -> syn::Result<_Expr> {
+    if input.peek(syn::token::Bracket) {
+        let content;
+        syn::bracketed!(content in input);
+        let id = content.parse::<syn::Ident>()?;
+        let _ = content.parse::<Token![:]>()?;
+        let type_annotation = Some(content.parse::<syn::Type>()?);
+        Ok(_Expr::_Identifier {
+            id,
+            type_annotation,
+        })
+    } else {
+        let id = input.parse::<syn::Ident>()?;
+        Ok(_Expr::_Identifier {
+            id,
+            type_annotation: None,
+        })
+    }
+}
+
 // parse an application
-fn parse_application(input: ParseBuffer) -> syn::Result<_Expr> {
+fn parse_application(input: &ParseBuffer) -> syn::Result<_Expr> {
     let procedure: _Expr = input.parse()?;
     let args: Vec<_Expr> = parse_zero_or_more(&input);
 
@@ -245,11 +260,19 @@ fn parse_atoms(input: ParseStream) -> syn::Result<_Expr> {
         Ok(_Expr::_String(input.parse()?))
     } else if input.peek(syn::LitInt) {
         Ok(_Expr::_Number(input.parse()?))
-    } else if input.peek(syn::Ident) || input.peek(syn::LitBool) || peek_op(&input) {
-        Ok(_Expr::_Identifier(input.parse()?))
+    } else if input.peek(syn::LitBool) {
+        Ok(_Expr::_Bool(input.parse()?))
+    } else if input.peek(syn::Ident) {
+        Ok(_Expr::_Identifier{
+            id: input.parse()?,
+            type_annotation: None,
+        })
+    } else if peek_op(&input) {
+        Ok(_Expr::_BinOp(input.parse()?))
     } else {
         Err(input.error("Failed to Parse Atom"))
     }
+
 }
 
 // helper function for parsing zero-or-more tokens
@@ -261,17 +284,37 @@ fn parse_zero_or_more<T: Parse>(input: &ParseBuffer) -> Vec<T> {
     result
 }
 
+fn parse_zero_or_more_compound<T: Parse>(input: &ParseBuffer, getter: fn(&ParseBuffer) -> syn::Result<T>) -> Vec<T> {
+    let mut result: Vec<T> = Vec::new();
+    while let Ok(item) = getter(input) {
+        result.push(item);
+    }
+    result
+}
+
 // helper function to check if the next token is one of the
 // accepted binary operators
 fn peek_op(input: &ParseStream) -> bool {
     // Define a list of concrete token types
-    let prim_ops: [&dyn Fn(&ParseStream) -> bool; 6] = [
-        &|input| input.peek(Plus),
-        &|input| input.peek(Minus),
-        &|input| input.peek(Star),
-        &|input| input.peek(Slash),
-        &|input| input.peek(EqEq),
-        &|input| input.peek(Le),
+    let prim_ops: [&dyn Fn(&ParseStream) -> bool; 18] = [
+        &|input| input.peek(Token![+]),
+        &|input| input.peek(Token![-]),
+        &|input| input.peek(Token![*]),
+        &|input| input.peek(Token![/]),
+        &|input| input.peek(Token![%]),
+        &|input| input.peek(Token![&]),
+        &|input| input.peek(Token![|]),
+        &|input| input.peek(Token![^]),
+        &|input| input.peek(Token![<<]),
+        &|input| input.peek(Token![>>]),
+        &|input| input.peek(Token![==]),
+        &|input| input.peek(Token![<=]),
+        &|input| input.peek(Token![>=]),
+        &|input| input.peek(Token![<]),
+        &|input| input.peek(Token![>]),
+        &|input| input.peek(Token![!=]),
+        &|input| input.peek(Token![&&]),
+        &|input| input.peek(Token![||]),
     ];
 
     // Check if any of the tokens are present in the input
@@ -302,14 +345,25 @@ fn generate_print_expr(expr: &_Expr, indent: usize) -> TokenStream {
                 println!("{}Number: {}", #indent_str, #n);
             }
         },
-        _Expr::_Identifier(id) => {
+        _Expr::_Bool(b) => {
             quote! {
-                println!("{}Identifier: {}", #indent_str, stringify!(#id));
+                println!("{}Bool: {}", #indent_str, stringify!(#b));
+            }
+        },
+        _Expr::_Identifier{id, type_annotation} => {
+            quote! {
+                println!("{}Identifier: {} : {}", #indent_str,
+                    stringify!(#id), stringify!(#type_annotation));
             }
         },
         _Expr::_String(s) => {
             quote! {
                 println!("{}String: {}", #indent_str, #s);
+            }
+        },
+        _Expr::_BinOp(b) => {
+            quote! {
+                println!("{}BinOp: {}", #indent_str, stringify!(#b));
             }
         },
         _Expr::_If { guard, then, other } => {
@@ -327,7 +381,7 @@ fn generate_print_expr(expr: &_Expr, indent: usize) -> TokenStream {
                 #other_print
             }
         },
-        _Expr::_Procedure { params, body } => {
+        _Expr::_Procedure { params, body, type_annotation } => {
             let params_print = params.iter().enumerate().map(|(i, param)| {
                 let param_print = generate_print_expr(param, indent + 1);
                 quote! {
@@ -342,6 +396,7 @@ fn generate_print_expr(expr: &_Expr, indent: usize) -> TokenStream {
                 println!("{}Procedure:", #indent_str);
                 println!("{}Parameters:", #indent_str);
                 #(#params_print)*
+                println!("{}Return Type Annotation: {}", #indent_str, stringify!(#type_annotation));
                 println!("{}Body:", #indent_str);
                 #body_print
             }
@@ -376,21 +431,27 @@ pub fn interp(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
 
     let tokens = walk_ast(&expr);
 
-    proc_macro::TokenStream::from(tokens)
+    let wrapper = quote! {
+        println!("{}", #tokens);
+    };
+
+    proc_macro::TokenStream::from(wrapper)
 }
 
 // recursively descends the ast, producing valid rust tokens
 fn walk_ast(expr: &_Expr) -> TokenStream {
     match expr {
         _Expr::_Number(n) => { quote! { #n } },
-        _Expr::_Identifier(id_t) => {
-            match id_t {
-                _IdTypes::_Op(op) => quote! { #op },
-                _IdTypes::_Id(id) => quote! { #id },
-                _IdTypes::_Bool(bl) => quote! { #bl },
+        _Expr::_Bool(bl) => quote! { #bl },
+        _Expr::_Identifier { id, type_annotation } => {
+            if let Some(ty) = type_annotation {
+                quote! { #id: #ty }
+            } else {
+                quote! { #id }
             }
         },
         _Expr::_String(s) => { quote! { #s } },
+        _Expr::_BinOp(b) => { quote! { #b } },
         _Expr::_If { guard, then, other } => {
             let guard_exp = walk_ast(guard);
             let then_exp = walk_ast(then);
@@ -404,14 +465,23 @@ fn walk_ast(expr: &_Expr) -> TokenStream {
                 }
             }
         },
-        _Expr::_Procedure { params, body } => {
+        _Expr::_Procedure { params, body, type_annotation } => {
             let param_tokens: Vec<TokenStream> = params.iter().map(|param| {
                 walk_ast(param)
             }).collect();
             let body_exp: TokenStream = walk_ast(body);
 
-            quote! {
-               ( | #(#param_tokens),* | #body_exp )
+            match type_annotation {
+                Some(type_annotation) => {
+                    quote! {
+                       ( | #(#param_tokens),* | -> #type_annotation { #body_exp })
+                    }
+                },
+                None => {
+                    quote! {
+                       ( | #(#param_tokens),* | #body_exp )
+                    }
+                },
             }
         },
         _Expr::_Application { proc, args } => {
@@ -420,13 +490,8 @@ fn walk_ast(expr: &_Expr) -> TokenStream {
             }).collect();
 
             match *proc.clone() {
-                _Expr::_Identifier(id) => match id {
-                    _IdTypes::_Op(_) => {
-                        handle_prim(walk_ast(proc), arg_tokens)
-                    }
-                    _IdTypes::_Id(_) | _IdTypes::_Bool(_) => {
-                        handle_proc(walk_ast(proc), arg_tokens)
-                    }
+                _Expr::_BinOp(_) => {
+                    handle_prim(walk_ast(proc), arg_tokens)
                 }
                 _ => {
                     handle_proc(walk_ast(proc), arg_tokens)
